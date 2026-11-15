@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#111827">
+  <title>Baixador de vídeos</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0b1020; color: #f8fafc; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; background: radial-gradient(ellipse at top, #222b50, #0b1020 65%); }
+    main { width: min(100%, 560px); padding: 30px; border: 1px solid #303a56; border-radius: 24px; background: #141b2dcc; box-shadow: 0 24px 80px #0008; }
+    .logo { width: 54px; height: 54px; display: grid; place-items: center; border-radius: 17px; background: #7557ff; font-size: 27px; }
+    h1 { margin: 20px 0 8px; font-size: clamp(25px, 6vw, 34px); }
+    .sub { margin: 0 0 24px; color: #bdc7dc; line-height: 1.55; }
+    label { display: block; margin-bottom: 8px; font-size: 14px; font-weight: 650; }
+    input { width: 100%; padding: 15px; border: 1px solid #48536d; border-radius: 12px; background: #0c1222; color: white; font: inherit; }
+    input:focus { outline: 2px solid #927fff; border-color: transparent; }
+    button, .open-link { width: 100%; display: block; margin-top: 14px; padding: 14px 18px; border: 0; border-radius: 12px; background: #8065ff; color: white; font: inherit; font-weight: 700; text-align: center; text-decoration: none; cursor: pointer; }
+    button:disabled { opacity: .6; cursor: wait; }
+    .open-link { background: #26314b; border: 1px solid #46516b; }
+    .status { min-height: 24px; margin: 18px 0 0; color: #cbd5e1; line-height: 1.5; overflow-wrap: anywhere; }
+    progress { width: 100%; height: 10px; margin-top: 16px; accent-color: #927fff; }
+    .note { margin-top: 22px; padding: 13px 15px; border-radius: 12px; background: #202a40; color: #c4cde0; font-size: 13px; line-height: 1.5; }
+    .small { margin-top: 16px; color: #96a2ba; font-size: 12px; line-height: 1.5; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="logo" aria-hidden="true">↓</div>
+    <h1>Baixador de vídeos</h1>
+    <p class="sub">Sem anúncios. Cole um link direto para um arquivo de vídeo que você tem autorização para baixar.</p>
+    <form id="form">
+      <label for="url">Link do vídeo</label>
+      <input id="url" name="url" type="url" inputmode="url" placeholder="https://site.com/video.mp4" autocomplete="url" required>
+      <button id="download" type="submit">Baixar vídeo</button>
+    </form>
+    <progress id="progress" value="0" max="100" hidden></progress>
+    <p id="status" class="status" role="status" aria-live="polite">Pronto para baixar um link direto autorizado.</p>
+    <a id="fallback" class="open-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Abrir link direto</a>
+    <button id="cancel" type="button" hidden>Cancelar download</button>
+    <div class="note">Este protótipo aceita arquivos diretos servidos com acesso permitido pelo próprio site. Não baixa de contas, plataformas protegidas, DRM ou links que exijam contornar restrições.</div>
+    <p class="small">Limite do navegador: alguns sites não permitem que esta página leia o arquivo (CORS) ou não oferecem o vídeo como arquivo direto. Nesses casos, use “Abrir link direto”; o site pode exibir o vídeo em vez de baixá-lo. O protótipo não envia o link a nenhum servidor.</p>
+  </main>
+  <script>
+    const form = document.querySelector('#form');
+    const urlInput = document.querySelector('#url');
+    const button = document.querySelector('#download');
+    const cancelButton = document.querySelector('#cancel');
+    const status = document.querySelector('#status');
+    const progress = document.querySelector('#progress');
+    const fallback = document.querySelector('#fallback');
+    let controller = null;
+    let objectUrl = null;
+
+    function clearObjectUrl() {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      objectUrl = null;
+    }
+
+    function videoName(url, contentType) {
+      let name = decodeURIComponent(new URL(url).pathname.split('/').pop() || 'video');
+      name = name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, '_').slice(0, 180);
+      const ext = /\.(mp4|mov|m4v|webm|mkv|avi)$/i;
+      if (!ext.test(name)) {
+        const byType = { 'video/mp4': '.mp4', 'video/quicktime': '.mov', 'video/webm': '.webm', 'video/x-matroska': '.mkv' };
+        name += byType[contentType] || '.mp4';
+      }
+      return name;
+    }
+
+    cancelButton.addEventListener('click', () => {
+      if (controller) controller.abort();
+    });
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      clearObjectUrl();
+      fallback.hidden = true;
+      const raw = urlInput.value.trim();
+      let parsed;
+      try { parsed = new URL(raw); } catch { status.textContent = 'Confira o link e tente novamente.'; return; }
+      if (parsed.protocol !== 'https:') {
+        status.textContent = 'Por segurança, use um link HTTPS.';
+        return;
+      }
+
+      fallback.href = parsed.href;
+      fallback.hidden = false;
+      controller = new AbortController();
+      button.disabled = true;
+      cancelButton.hidden = false;
+      progress.hidden = false;
+      progress.removeAttribute('value');
+      status.textContent = 'Conectando ao arquivo…';
+
+      try {
+        const response = await fetch(parsed.href, { signal: controller.signal, mode: 'cors', credentials: 'omit' });
+        if (!response.ok) throw new Error('O site não disponibilizou o arquivo (HTTP ' + response.status + ').');
+        const type = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+        const name = videoName(parsed.href, type);
+        const isVideo = type.startsWith('video/') || /\.(mp4|mov|m4v|webm|mkv|avi)$/i.test(parsed.pathname);
+        if (!isVideo) throw new Error('O endereço não parece ser um arquivo de vídeo direto.');
+
+        const total = Number(response.headers.get('content-length'));
+        const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+        let blob;
+        if (reader) {
+          const chunks = [];
+          let received = 0;
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value);
+            received += value.byteLength;
+            if (total > 0) {
+              progress.max = total;
+              progress.value = received;
+              status.textContent = 'Baixando… ' + Math.floor(received / total * 100) + '%';
+            } else {
+              progress.removeAttribute('value');
+              status.textContent = 'Baixando… ' + (received / 1048576).toFixed(1) + ' MB';
+            }
+          }
+          blob = new Blob(chunks, { type: type || 'application/octet-stream' });
+        } else {
+          blob = await response.blob();
+        }
+        objectUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = objectUrl;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        status.textContent = 'Download iniciado: ' + name;
+      } catch (error) {
+        if (error.name === 'AbortError') {
+          status.textContent = 'Download cancelado.';
+        } else if (error instanceof TypeError) {
+          status.textContent = 'O site não permite o acesso direto pelo navegador. Você ainda pode tentar “Abrir link direto”; não contorno essa restrição.';
+        } else {
+          status.textContent = error.message || 'Não foi possível baixar este link.';
+        }
+      } finally {
+        controller = null;
+        button.disabled = false;
+        cancelButton.hidden = true;
+        progress.hidden = true;
+        progress.value = 0;
+      }
+    });
+
+    window.addEventListener('beforeunload', clearObjectUrl);
+  </script>
+</body>
+</html>
